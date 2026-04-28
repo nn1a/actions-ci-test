@@ -13,7 +13,12 @@ let currentRunFilters = {
 
 async function init() {
   try {
-    const me = await fetch(`${API_BASE}/api/me`).then((r) => r.json());
+    const meRes = await fetch(`${API_BASE}/api/me`);
+    if (!meRes.ok) {
+      throw new Error('unauthenticated');
+    }
+
+    const me = await meRes.json();
     const options = await fetchOptions();
     renderLoggedIn(me, options);
     loadRuns(currentRunFilters);
@@ -43,6 +48,7 @@ async function fetchOptions() {
 }
 
 function renderNotLoggedIn() {
+  document.getElementById('user-info').textContent = '';
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="login-section">
@@ -102,7 +108,7 @@ function renderLoggedIn(user, options) {
       <form id="runs-filter-form" class="form-group" style="margin-bottom: 12px;">
         <div class="form-group">
           <label for="filter-requester">Requester</label>
-          <input type="text" id="filter-requester" placeholder="e.g., nn1a" />
+          <input type="text" id="filter-requester" placeholder="e.g., github-user" />
         </div>
         <div class="form-group">
           <label for="filter-request-id">Request ID</label>
