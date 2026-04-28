@@ -1,0 +1,59 @@
+name: External Request
+
+on:
+  repository_dispatch:
+    types: [manual-job-requested]
+
+run-name: >
+  ${{ github.event.client_payload.job_type }}
+  by ${{ github.event.client_payload.requested_by.github_login }}
+  (${{ github.event.client_payload.request_id }})
+
+jobs:
+  validate-and-run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate required payload fields
+        env:
+          REQUEST_ID: ${{ github.event.client_payload.request_id }}
+          REQUESTED_BY: ${{ github.event.client_payload.requested_by.github_login }}
+          JOB_TYPE: ${{ github.event.client_payload.job_type }}
+          SERVICE: ${{ github.event.client_payload.parameters.service }}
+          VERSION: ${{ github.event.client_payload.parameters.version }}
+          ENVIRONMENT: ${{ github.event.client_payload.parameters.environment }}
+        run: |
+          test -n "$REQUEST_ID"
+          test -n "$REQUESTED_BY"
+          test -n "$JOB_TYPE"
+          test -n "$SERVICE"
+          test -n "$VERSION"
+          test -n "$ENVIRONMENT"
+
+      - name: Record requester context
+        run: |
+          {
+            echo "## External Request"
+            echo ""
+            echo "- Request ID: ${{ github.event.client_payload.request_id }}"
+            echo "- Requested by: ${{ github.event.client_payload.requested_by.github_login }}"
+            echo "- Requested at: ${{ github.event.client_payload.requested_at }}"
+            echo "- Job type: ${{ github.event.client_payload.job_type }}"
+            echo "- Service: ${{ github.event.client_payload.parameters.service }}"
+            echo "- Version: ${{ github.event.client_payload.parameters.version }}"
+            echo "- Environment: ${{ github.event.client_payload.parameters.environment }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run job logic
+        env:
+          SERVICE: ${{ github.event.client_payload.parameters.service }}
+          VERSION: ${{ github.event.client_payload.parameters.version }}
+          ENVIRONMENT: ${{ github.event.client_payload.parameters.environment }}
+        run: |
+          echo "Workflow triggered successfully!"
+          echo "service=$SERVICE version=$VERSION environment=$ENVIRONMENT"
