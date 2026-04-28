@@ -19,6 +19,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.get('/auth/github/login', (_req, res) => {
+  requireOauthConfig(config);
   const state = issueSignedToken(
     { nonce: crypto.randomBytes(16).toString('hex') },
     config.sessionSecret,
@@ -38,6 +39,7 @@ app.get('/auth/github/login', (_req, res) => {
 
 app.get('/auth/github/callback', async (req, res, next) => {
   try {
+    requireOauthConfig(config);
     const code = typeof req.query.code === 'string' ? req.query.code : '';
     const state = typeof req.query.state === 'string' ? req.query.state : '';
     const storedState = req.cookies[config.oauthStateCookieName];
@@ -109,6 +111,7 @@ app.get('/api/csrf-token', requireSession(config), (req, res) => {
 
 app.post('/api/requests', requireSession(config), requireCsrfToken(config), async (req, res, next) => {
   try {
+    requireGithubTriggerCredentials(config);
     const requestBody = validateRequestBody(req.body, config);
     enforceAllowedGithubLogin(req.session.github_login, config);
 
@@ -147,6 +150,7 @@ app.post('/api/requests', requireSession(config), requireCsrfToken(config), asyn
 
 app.get('/api/runs', requireSession(config), async (req, res, next) => {
   try {
+    requireGithubTriggerCredentials(config);
     const perPage = parsePositiveInteger(req.query.per_page, 20, 100);
     const page = parsePositiveInteger(req.query.page, 1, 1000);
     const requester = String(req.query.requester || '').trim().toLowerCase();
@@ -175,6 +179,7 @@ app.get('/api/runs', requireSession(config), async (req, res, next) => {
 
 app.get('/api/runs/:runId', requireSession(config), async (req, res, next) => {
   try {
+    requireGithubTriggerCredentials(config);
     const runId = String(req.params.runId || '').trim();
     if (!/^\d+$/.test(runId)) {
       return res.status(400).json({ error: 'invalid_run_id' });
@@ -217,27 +222,21 @@ function loadConfig() {
   const githubAppPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY;
   const githubAppInstallationId = process.env.GITHUB_APP_INSTALLATION_ID;
 
-  if (!githubTriggerToken && !(githubAppId && githubAppPrivateKey && githubAppInstallationId)) {
-    throw new Error(
-      'Either GITHUB_TRIGGER_TOKEN or (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_APP_INSTALLATION_ID) must be set',
-    );
-  }
-
   return {
     port: Number(process.env.PORT || 3000),
-    uiRedirectUrl: getRequiredEnv('UI_REDIRECT_URL'),
-    sessionSecret: getRequiredEnv('SESSION_SECRET'),
+    uiRedirectUrl: process.env.UI_REDIRECT_URL || 'http://localhost:3000/',
+    sessionSecret: process.env.SESSION_SECRET || 'dev-only-session-secret-change-me',
     cookieSecure: process.env.COOKIE_SECURE === 'true',
     sessionTtlSeconds: Number(process.env.SESSION_TTL_SECONDS || 28800),
-    githubOauthClientId: getRequiredEnv('GITHUB_OAUTH_CLIENT_ID'),
-    githubOauthClientSecret: getRequiredEnv('GITHUB_OAUTH_CLIENT_SECRET'),
-    githubOauthCallbackUrl: getRequiredEnv('GITHUB_OAUTH_CALLBACK_URL'),
+    githubOauthClientId: process.env.GITHUB_OAUTH_CLIENT_ID || '',
+    githubOauthClientSecret: process.env.GITHUB_OAUTH_CLIENT_SECRET || '',
+    githubOauthCallbackUrl: process.env.GITHUB_OAUTH_CALLBACK_URL || 'http://localhost:3000/auth/github/callback',
     githubTriggerToken,
     githubAppId,
     githubAppPrivateKey,
     githubAppInstallationId,
-    githubRepositoryOwner: getRequiredEnv('GITHUB_REPOSITORY_OWNER'),
-    githubRepositoryName: getRequiredEnv('GITHUB_REPOSITORY_NAME'),
+    githubRepositoryOwner: process.env.GITHUB_REPOSITORY_OWNER || '',
+    githubRepositoryName: process.env.GITHUB_REPOSITORY_NAME || '',
     githubEventType: process.env.GITHUB_EVENT_TYPE || 'manual-job-requested',
     githubApiBaseUrl: process.env.GITHUB_API_BASE_URL || 'https://api.github.com',
     allowedJobTypes: parseCsv(process.env.ALLOWED_JOB_TYPES || 'deploy-staging'),
@@ -249,20 +248,52 @@ function loadConfig() {
   };
 }
 
-function getRequiredEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-
-  return value;
-}
-
 function parseCsv(value) {
   return value
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function hasGithubTriggerCredentials(config) {
+  return Boolean(
+    config.githubTriggerToken
+      || (config.githubAppId && config.githubAppPrivateKey && config.githubAppInstallationId),
+  );
+}
+
+function hasGithubRepositoryConfig(config) {
+  return Boolean(config.githubRepositoryOwner && config.githubRepositoryName);
+}
+
+function requireOauthConfig(config) {
+  if (config.githubOauthClientId && config.githubOauthClientSecret && config.githubOauthCallbackUrl) {
+    return;
+  }
+
+  throw new HttpError(503, {
+    error: 'oauth_not_configured',
+    message: 'Set GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET, and GITHUB_OAUTH_CALLBACK_URL',
+  });
+}
+
+function requireGithubTriggerCredentials(config) {
+  if (!hasGithubRepositoryConfig(config)) {
+    throw new HttpError(503, {
+      error: 'github_repository_not_configured',
+      message: 'Set GITHUB_REPOSITORY_OWNER and GITHUB_REPOSITORY_NAME',
+    });
+  }
+
+  if (hasGithubTriggerCredentials(config)) {
+    return;
+  }
+
+  throw new HttpError(503, {
+    error: 'github_trigger_credentials_not_configured',
+    message:
+      'Set GITHUB_TRIGGER_TOKEN or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_APP_INSTALLATION_ID',
+  });
 }
 
 function buildCookieOptions(config, maxAge) {
