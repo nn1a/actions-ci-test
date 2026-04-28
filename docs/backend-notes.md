@@ -39,6 +39,22 @@ MVP fallback with service PAT:
 
 - `SESSION_SECRET`
 
+## Runtime Configuration Behavior
+
+Current server behavior is intentionally split:
+
+1. Startup behavior
+- Server can start with partial config for local development.
+- Some values have defaults (for example `UI_REDIRECT_URL`, `SESSION_SECRET`, callback URL).
+
+2. Endpoint behavior
+- OAuth endpoints enforce OAuth config at request time.
+- GitHub trigger and run endpoints enforce repository + trigger credential config at request time.
+- Missing runtime config returns clear `503` errors:
+	- `oauth_not_configured`
+	- `github_repository_not_configured`
+	- `github_trigger_credentials_not_configured`
+
 ## Minimal Request Handling Flow
 
 ### 1. Authenticate
@@ -70,6 +86,14 @@ MVP fallback with service PAT:
 - Return `request_id` to the UI
 - Let the UI poll recent runs via backend or GitHub API proxy
 
+### 6. Filter runs
+
+- `GET /api/runs` supports:
+	- `requester` filter
+	- `request_id` filter
+- The backend filters by `run_name` using naming convention:
+	- `<job_type> by <requester> (<request_id>)`
+
 ## Safe Validation Pattern
 
 The backend should avoid passing free-form command fragments. Inputs should map to known backend-defined options.
@@ -95,6 +119,14 @@ Preferred:
 
 This keeps the backend stateless while avoiding local-storage token handling in the browser.
 
+## CSRF Strategy
+
+- `GET /api/csrf-token` issues a signed token for authenticated sessions.
+- Write endpoints require `X-CSRF-Token`.
+- Missing/invalid CSRF token returns:
+	- `missing_csrf_token`
+	- `invalid_csrf_token`
+
 ## How To Show Real Requester In Actions
 
 The workflow actor will usually be the backend identity. To show the real requester:
@@ -116,3 +148,25 @@ You should expect these gaps from day one:
 - No efficient historical search by requester
 
 If one of these becomes necessary, add a small durable store rather than forcing more logic into GitHub Actions.
+
+## Test and Verification
+
+- Syntax check:
+
+```bash
+npm run check
+```
+
+- OAuth flow smoke test:
+
+```bash
+npm run e2e:oauth
+```
+
+- Include dispatch trigger in smoke test:
+
+```bash
+RUN_DISPATCH=true npm run e2e:oauth
+```
+
+The smoke script validates health, OAuth redirect, callback state handling, session-auth endpoints, and optional dispatch flow.

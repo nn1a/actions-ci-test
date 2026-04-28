@@ -2,43 +2,63 @@
 
 ## Overview
 
-This API assumes:
+This backend is a stateless API server for:
 
-- End users authenticate with GitHub OAuth.
-- The backend is stateless.
-- The backend triggers GitHub Actions with a service identity.
-- The backend does not persist request history in a database.
+- GitHub OAuth sign-in
+- Request validation and authorization
+- GitHub Actions trigger and run lookup
 
-## Authentication
+The browser must never send requester identity directly. Identity is derived from the authenticated session.
 
-Use one of the following session models:
+## Session and Security Model
 
-1. Signed HTTP-only cookie
-2. JWT stored in an HTTP-only cookie
-
-The client must never send `requested_by` directly. The backend derives requester identity from the authenticated session.
+- Session: signed HTTP-only cookie (`portal_session`)
+- CSRF: signed token from `GET /api/csrf-token`, sent via `X-CSRF-Token`
+- Request validation: allowlist + strict pattern checks
 
 ## Endpoints
 
+### `GET /health`
+
+Health check.
+
+Response:
+
+```json
+{
+  "ok": true
+}
+```
+
 ### `GET /auth/github/login`
 
-Redirect the browser to GitHub OAuth.
+Redirect to GitHub OAuth authorize page.
+
+Possible errors:
+
+- `503 oauth_not_configured`
 
 ### `GET /auth/github/callback`
 
-Handle the OAuth callback.
+OAuth callback endpoint.
 
-Responsibilities:
+Behavior:
 
 - Verify OAuth state
 - Exchange code for token
-- Fetch current GitHub user profile
-- Issue signed session
-- Redirect to UI
+- Load GitHub user profile
+- Issue session cookie
+- Redirect to `UI_REDIRECT_URL`
+
+Possible errors:
+
+- `400 invalid_oauth_state`
+- `400 expired_oauth_state`
+- `503 oauth_not_configured`
 
 ### `POST /auth/logout`
 
-Clear the current session.
+Clear session cookie.
 
 Response:
 
@@ -50,42 +70,64 @@ Response:
 
 ### `GET /api/me`
 
-Return the current authenticated user.
+Return authenticated user session payload.
 
-Response:
+Auth required: yes
+
+Response example:
 
 ```json
 {
-  "github_login": "alice",
+  "github_login": "github-user",
   "github_user_id": 12345678,
-  "display_name": "Alice Kim",
-  "avatar_url": "https://avatars.githubusercontent.com/u/12345678"
+  "display_name": "GitHub User",
+  "avatar_url": "https://avatars.githubusercontent.com/u/12345678",
+  "email": "user@example.com",
+  "exp": 1777417367
+}
+```
+
+### `GET /api/options`
+
+Return dynamic UI options from server allowlist config.
+
+Auth required: yes
+
+Response example:
+
+```json
+{
+  "job_types": ["deploy-staging"],
+  "services": ["billing-api", "auth-api", "web-frontend"],
+  "environments": ["staging", "prod"]
 }
 ```
 
 ### `GET /api/csrf-token`
 
-Return a CSRF token for use in POST requests.
+Issue CSRF token for write endpoints.
 
-This endpoint is authenticated and requires a valid session. The token should be sent in the `X-CSRF-Token` header for POST requests.
+Auth required: yes
 
 Response:
 
 ```json
 {
-  "csrf_token": "eyJub25jZSI6IjM2NTcyZGY2MjZlNjYzYzgyZTgyYWI2ZjM0Y2Y1YzAwIiwiZXhwIjoxNjEyMzQ1NjAwfQ.signature"
+  "csrf_token": "<signed-token>"
 }
 ```
 
 ### `POST /api/requests`
 
-Trigger a GitHub Actions workflow through `repository_dispatch`.
+Trigger workflow through GitHub `repository_dispatch`.
 
-Required headers:
+Auth required: yes
 
-- `X-CSRF-Token`: CSRF token obtained from `GET /api/csrf-token`
+Headers:
 
-Request body:
+- `X-CSRF-Token: <token>`
+
+Body:
 
 ```json
 {
@@ -98,61 +140,42 @@ Request body:
 }
 ```
 
-Validation rules:
-
-- `job_type` must be one of the allowed job identifiers.
-- `parameters.service` must be from a controlled allowlist.
-- `parameters.environment` must be from a controlled allowlist.
-- `parameters.version` must match a safe version pattern such as `^[A-Za-z0-9._-]+$`.
-
 Response:
 
 ```json
 {
-  "request_id": "req_20260428T101203Z_alice_a1b2c3",
+  "request_id": "req_20260429T101203Z_github-user_a1b2c3",
   "status": "accepted",
   "repository": "org/repo",
   "event_type": "manual-job-requested"
 }
 ```
 
-Failure examples:
+Possible errors:
 
-`401 Unauthorized`
-
-```json
-{
-  "error": "unauthenticated"
-}
-```
-
-`403 Forbidden`
-
-```json
-{
-  "error": "not_allowed_for_job_type"
-}
-```
-
-`400 Bad Request`
-
-```json
-{
-  "error": "invalid_parameter",
-  "field": "parameters.version"
-}
-```
+- `401 unauthenticated`
+- `403 missing_csrf_token`
+- `403 invalid_csrf_token`
+- `403 not_allowed_for_job_type`
+- `400 invalid_request_body`
+- `400 invalid_parameter`
+- `503 github_repository_not_configured`
+- `503 github_trigger_credentials_not_configured`
 
 ### `GET /api/runs`
 
-Return recent workflow runs from GitHub Actions.
+List workflow runs.
+
+Auth required: yes
 
 Query params:
 
-- `per_page`: optional, default `20`
-- `page`: optional, default `1`
+- `per_page` (optional, default `20`, max `100`)
+- `page` (optional, default `1`)
+- `requester` (optional, exact requester match using run-name convention)
+- `request_id` (optional, substring match in run-name)
 
-Response:
+Response example:
 
 ```json
 {
@@ -161,45 +184,49 @@ Response:
       "run_id": 987654321,
       "status": "completed",
       "conclusion": "success",
-      "run_name": "deploy-staging by alice (req_20260428T101203Z_alice_a1b2c3)",
-      "created_at": "2026-04-28T10:12:10Z",
+      "run_name": "deploy-staging by github-user (req_20260429T101203Z_github-user_a1b2c3)",
+      "created_at": "2026-04-29T10:12:10Z",
       "html_url": "https://github.com/org/repo/actions/runs/987654321"
     }
   ]
 }
 ```
 
+Possible errors:
+
+- `401 unauthenticated`
+- `503 github_repository_not_configured`
+- `503 github_trigger_credentials_not_configured`
+
 ### `GET /api/runs/:runId`
 
-Return details for a specific GitHub Actions run.
+Get one workflow run by run id.
 
-Response:
+Auth required: yes
 
-```json
-{
-  "run_id": 987654321,
-  "status": "in_progress",
-  "conclusion": null,
-  "run_name": "deploy-staging by alice (req_20260428T101203Z_alice_a1b2c3)",
-  "html_url": "https://github.com/org/repo/actions/runs/987654321"
-}
-```
+Possible errors:
+
+- `400 invalid_run_id`
+- `401 unauthenticated`
+- `503 github_repository_not_configured`
+- `503 github_trigger_credentials_not_configured`
 
 ## Dispatch Mapping
 
-`POST /api/requests` should translate the client request into the following GitHub dispatch body:
+`POST /api/requests` maps request + session identity to this payload:
 
 ```json
 {
   "event_type": "manual-job-requested",
   "client_payload": {
-    "request_id": "req_20260428T101203Z_alice_a1b2c3",
+    "request_id": "req_20260429T101203Z_github-user_a1b2c3",
     "requested_by": {
-      "github_login": "alice",
+      "github_login": "github-user",
       "github_user_id": 12345678,
-      "display_name": "Alice Kim"
+      "display_name": "GitHub User",
+      "email": "user@example.com"
     },
-    "requested_at": "2026-04-28T10:12:03Z",
+    "requested_at": "2026-04-29T10:12:03Z",
     "job_type": "deploy-staging",
     "parameters": {
       "service": "billing-api",
@@ -210,9 +237,8 @@ Response:
 }
 ```
 
-## Implementation Notes
+## Notes
 
-- Keep the GitHub trigger credential only on the backend.
-- Use the session identity as the source of truth for requester metadata.
-- Return `request_id` immediately after GitHub accepts the dispatch.
-- Do not claim a concrete run ID at trigger time unless a later lookup step is added.
+- Server startup does not require all runtime integrations to be configured.
+- Missing OAuth or GitHub trigger/repository config is reported as `503` on relevant endpoints.
+- `request_id` is returned immediately after GitHub accepts dispatch; run id is resolved separately via run APIs.
