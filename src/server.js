@@ -149,20 +149,24 @@ app.get('/api/runs', requireSession(config), async (req, res, next) => {
   try {
     const perPage = parsePositiveInteger(req.query.per_page, 20, 100);
     const page = parsePositiveInteger(req.query.page, 1, 1000);
+    const requester = String(req.query.requester || '').trim().toLowerCase();
+    const requestId = String(req.query.request_id || '').trim();
     const response = await githubRequest(
       config,
       `/repos/${config.githubRepositoryOwner}/${config.githubRepositoryName}/actions/runs?per_page=${perPage}&page=${page}`,
     );
 
-    res.json({
-      runs: (response.workflow_runs || []).map((run) => ({
+    const runs = (response.workflow_runs || []).map((run) => ({
         run_id: run.id,
         status: run.status,
         conclusion: run.conclusion,
         run_name: run.display_title || run.name,
         created_at: run.created_at,
         html_url: run.html_url,
-      })),
+      }));
+
+    res.json({
+      runs: runs.filter((run) => runMatchesFilters(run, requester, requestId)),
     });
   } catch (error) {
     next(error);
@@ -564,6 +568,24 @@ function parsePositiveInteger(value, fallback, max) {
   }
 
   return Math.min(parsed, max);
+}
+
+function runMatchesFilters(run, requester, requestId) {
+  const runName = String(run.run_name || '');
+  if (requestId && !runName.includes(requestId)) {
+    return false;
+  }
+
+  if (!requester) {
+    return true;
+  }
+
+  const match = runName.match(/ by ([^()]+) \(([^()]+)\)\s*$/);
+  if (match?.[1]) {
+    return match[1].trim().toLowerCase() === requester;
+  }
+
+  return runName.toLowerCase().includes(requester);
 }
 
 class HttpError extends Error {

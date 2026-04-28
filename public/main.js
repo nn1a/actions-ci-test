@@ -6,12 +6,17 @@ const DEFAULT_OPTIONS = {
   environments: ['staging', 'prod'],
 };
 
+let currentRunFilters = {
+  requester: '',
+  request_id: '',
+};
+
 async function init() {
   try {
     const me = await fetch(`${API_BASE}/api/me`).then((r) => r.json());
     const options = await fetchOptions();
     renderLoggedIn(me, options);
-    loadRuns();
+    loadRuns(currentRunFilters);
   } catch {
     renderNotLoggedIn();
   }
@@ -94,11 +99,27 @@ function renderLoggedIn(user, options) {
 
     <div class="runs-section">
       <h2>Recent Runs</h2>
+      <form id="runs-filter-form" class="form-group" style="margin-bottom: 12px;">
+        <div class="form-group">
+          <label for="filter-requester">Requester</label>
+          <input type="text" id="filter-requester" placeholder="e.g., nn1a" />
+        </div>
+        <div class="form-group">
+          <label for="filter-request-id">Request ID</label>
+          <input type="text" id="filter-request-id" placeholder="e.g., req_20260429..." />
+        </div>
+        <div class="form-actions" style="margin-top: 8px;">
+          <button type="submit" class="btn btn-secondary">Apply Filters</button>
+          <button type="button" id="clear-filters" class="btn btn-secondary">Clear</button>
+        </div>
+      </form>
       <ul class="runs-list" id="runs-list"></ul>
     </div>
   `;
 
   document.getElementById('request-form').addEventListener('submit', submitRequest);
+  document.getElementById('runs-filter-form').addEventListener('submit', applyRunFilters);
+  document.getElementById('clear-filters').addEventListener('click', clearRunFilters);
 }
 
 function buildOptionsHtml(values, placeholder) {
@@ -153,7 +174,7 @@ async function submitRequest(e) {
     `;
 
     document.getElementById('request-form').reset();
-    setTimeout(() => loadRuns(), 1000);
+    setTimeout(() => loadRuns(currentRunFilters), 1000);
   } catch (error) {
     alerts.innerHTML = `
       <div class="alert alert-error">
@@ -165,9 +186,17 @@ async function submitRequest(e) {
   }
 }
 
-async function loadRuns() {
+async function loadRuns(filters = currentRunFilters) {
   try {
-    const res = await fetch(`${API_BASE}/api/runs`);
+    const params = new URLSearchParams();
+    if (filters.requester) {
+      params.set('requester', filters.requester);
+    }
+    if (filters.request_id) {
+      params.set('request_id', filters.request_id);
+    }
+    const query = params.toString();
+    const res = await fetch(`${API_BASE}/api/runs${query ? `?${query}` : ''}`);
     const data = await res.json();
     const runs = data.runs || [];
 
@@ -194,6 +223,27 @@ async function loadRuns() {
   } catch (error) {
     console.error('Failed to load runs:', error);
   }
+}
+
+function applyRunFilters(e) {
+  e.preventDefault();
+  const requester = document.getElementById('filter-requester').value.trim();
+  const requestId = document.getElementById('filter-request-id').value.trim();
+  currentRunFilters = {
+    requester,
+    request_id: requestId,
+  };
+  loadRuns(currentRunFilters);
+}
+
+function clearRunFilters() {
+  document.getElementById('filter-requester').value = '';
+  document.getElementById('filter-request-id').value = '';
+  currentRunFilters = {
+    requester: '',
+    request_id: '',
+  };
+  loadRuns(currentRunFilters);
 }
 
 async function logOut() {
