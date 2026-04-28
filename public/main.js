@@ -1,12 +1,39 @@
 const API_BASE = '';
 
+const DEFAULT_OPTIONS = {
+  job_types: ['deploy-staging'],
+  services: ['billing-api', 'auth-api', 'web-frontend'],
+  environments: ['staging', 'prod'],
+};
+
 async function init() {
   try {
     const me = await fetch(`${API_BASE}/api/me`).then((r) => r.json());
-    renderLoggedIn(me);
+    const options = await fetchOptions();
+    renderLoggedIn(me, options);
     loadRuns();
   } catch {
     renderNotLoggedIn();
+  }
+}
+
+async function fetchOptions() {
+  try {
+    const res = await fetch(`${API_BASE}/api/options`);
+    if (!res.ok) {
+      return DEFAULT_OPTIONS;
+    }
+
+    const data = await res.json();
+    return {
+      job_types: Array.isArray(data.job_types) && data.job_types.length ? data.job_types : DEFAULT_OPTIONS.job_types,
+      services: Array.isArray(data.services) && data.services.length ? data.services : DEFAULT_OPTIONS.services,
+      environments: Array.isArray(data.environments) && data.environments.length
+        ? data.environments
+        : DEFAULT_OPTIONS.environments,
+    };
+  } catch {
+    return DEFAULT_OPTIONS;
   }
 }
 
@@ -20,8 +47,12 @@ function renderNotLoggedIn() {
   `;
 }
 
-function renderLoggedIn(user) {
+function renderLoggedIn(user, options) {
   document.getElementById('user-info').textContent = `Logged in as ${user.github_login}`;
+
+  const jobTypeOptions = buildOptionsHtml(options.job_types, 'Select a job type');
+  const serviceOptions = buildOptionsHtml(options.services, 'Select a service');
+  const environmentOptions = buildOptionsHtml(options.environments, 'Select an environment');
 
   const app = document.getElementById('app');
   app.innerHTML = `
@@ -29,18 +60,14 @@ function renderLoggedIn(user) {
       <div class="form-group">
         <label for="job-type">Job Type</label>
         <select id="job-type" name="job_type" required>
-          <option value="">Select a job type</option>
-          <option value="deploy-staging">Deploy to Staging</option>
+          ${jobTypeOptions}
         </select>
       </div>
 
       <div class="form-group">
         <label for="service">Service</label>
         <select id="service" name="service" required>
-          <option value="">Select a service</option>
-          <option value="billing-api">billing-api</option>
-          <option value="auth-api">auth-api</option>
-          <option value="web-frontend">web-frontend</option>
+          ${serviceOptions}
         </select>
       </div>
 
@@ -52,9 +79,7 @@ function renderLoggedIn(user) {
       <div class="form-group">
         <label for="environment">Environment</label>
         <select id="environment" name="environment" required>
-          <option value="">Select an environment</option>
-          <option value="staging">Staging</option>
-          <option value="prod">Production</option>
+          ${environmentOptions}
         </select>
       </div>
 
@@ -74,6 +99,12 @@ function renderLoggedIn(user) {
   `;
 
   document.getElementById('request-form').addEventListener('submit', submitRequest);
+}
+
+function buildOptionsHtml(values, placeholder) {
+  return [`<option value="">${placeholder}</option>`]
+    .concat(values.map((value) => `<option value="${value}">${value}</option>`))
+    .join('');
 }
 
 async function submitRequest(e) {

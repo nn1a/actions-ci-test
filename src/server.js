@@ -90,6 +90,14 @@ app.get('/api/me', requireSession(config), (req, res) => {
   res.json(req.session);
 });
 
+app.get('/api/options', requireSession(config), (_req, res) => {
+  res.json({
+    job_types: config.allowedJobTypes,
+    services: config.allowedServices,
+    environments: config.allowedEnvironments,
+  });
+});
+
 app.get('/api/csrf-token', requireSession(config), (req, res) => {
   const csrfToken = issueSignedToken(
     { nonce: crypto.randomBytes(16).toString('hex') },
