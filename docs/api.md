@@ -10,6 +10,8 @@ This backend is a stateless API server for:
 
 The browser must never send requester identity directly. Identity is derived from the authenticated session.
 
+Every response includes `X-Request-Id` for request correlation.
+
 ## Session and Security Model
 
 - Session: signed HTTP-only cookie (`portal_session`)
@@ -37,6 +39,7 @@ Redirect to GitHub OAuth authorize page.
 Possible errors:
 
 - `503 oauth_not_configured`
+- `429 rate_limit_exceeded`
 
 ### `GET /auth/github/callback`
 
@@ -54,7 +57,10 @@ Possible errors:
 
 - `400 invalid_oauth_state`
 - `400 expired_oauth_state`
+- `403 not_allowed_by_org_membership`
+- `403 not_allowed_by_team_membership`
 - `503 oauth_not_configured`
+- `429 rate_limit_exceeded`
 
 ### `POST /auth/logout`
 
@@ -159,6 +165,7 @@ Possible errors:
 - `403 not_allowed_for_job_type`
 - `400 invalid_request_body`
 - `400 invalid_parameter`
+- `429 rate_limit_exceeded`
 - `503 github_repository_not_configured`
 - `503 github_trigger_credentials_not_configured`
 
@@ -241,4 +248,8 @@ Possible errors:
 
 - Server startup does not require all runtime integrations to be configured.
 - Missing OAuth or GitHub trigger/repository config is reported as `503` on relevant endpoints.
+- Development mode can start with a default session secret, but production mode requires an explicit `SESSION_SECRET`.
+- Simple in-memory rate limiting is applied to OAuth login, OAuth callback, and workflow trigger endpoints.
+- OAuth login can be restricted by organization/team membership using `REQUIRED_GITHUB_ORG` and `REQUIRED_GITHUB_TEAM_SLUG`.
+- Structured JSON logs are emitted with a per-request correlation id, also returned as `X-Request-Id`.
 - `request_id` is returned immediately after GitHub accepts dispatch; run id is resolved separately via run APIs.

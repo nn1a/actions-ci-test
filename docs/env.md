@@ -48,10 +48,23 @@ UI_REDIRECT_URL=http://localhost:3000/
 - 사용 위치: 세션 쿠키 발급/검증, CSRF 토큰 발급/검증
 - 기본값: `dev-only-session-secret-change-me` (개발용)
 - 운영 권장: 충분히 긴 랜덤 문자열 사용
+- 운영 동작: `NODE_ENV=production` 에서 기본값이면 서버 시작 실패
 - 예시:
 
 ```env
 SESSION_SECRET=replace-with-a-long-random-secret
+```
+
+### `NODE_ENV`
+- 목적: 실행 환경 구분
+- 기본값: `development`
+- 현재 영향:
+	- `production` 이면 기본 `SESSION_SECRET` 사용 금지
+	- 그 외에는 개발 편의를 위해 기본 시크릿 허용, 경고 로그 출력
+- 예시:
+
+```env
+NODE_ENV=production
 ```
 
 ### `COOKIE_SECURE`
@@ -96,6 +109,30 @@ SESSION_TTL_SECONDS=28800
 GITHUB_OAUTH_CLIENT_ID=your-client-id
 GITHUB_OAUTH_CLIENT_SECRET=your-client-secret
 GITHUB_OAUTH_CALLBACK_URL=http://localhost:3000/auth/github/callback
+```
+
+### `REQUIRED_GITHUB_ORG`
+- 목적: OAuth 로그인 사용자가 반드시 속해야 하는 GitHub organization
+- 사용 위치: `GET /auth/github/callback`
+- 동작: 설정되면 로그인 완료 전에 `/user/orgs` 기준 membership 검증
+- 미충족 시: `403 not_allowed_by_org_membership`
+- 예시:
+
+```env
+REQUIRED_GITHUB_ORG=your-org
+```
+
+### `REQUIRED_GITHUB_TEAM_SLUG`
+- 목적: OAuth 로그인 사용자가 반드시 속해야 하는 team slug
+- 전제: `REQUIRED_GITHUB_ORG` 도 함께 설정되어야 함
+- 사용 위치: `GET /auth/github/callback`
+- 동작: 설정되면 `/orgs/{org}/teams/{team_slug}/memberships/{username}` 기준 검증
+- 미충족 시: `403 not_allowed_by_team_membership`
+- 예시:
+
+```env
+REQUIRED_GITHUB_ORG=your-org
+REQUIRED_GITHUB_TEAM_SLUG=platform-team
 ```
 
 ## GitHub Actions 트리거 인증
@@ -224,6 +261,7 @@ ALLOWED_GITHUB_LOGINS=
 - 강한 `SESSION_SECRET`
 - GitHub App 방식 사용
 - `ALLOWED_GITHUB_LOGINS` 또는 조직/팀 기반 권한 통제 적용
+- `REQUIRED_GITHUB_ORG` / `REQUIRED_GITHUB_TEAM_SLUG` 로 로그인 단계에서 선제 차단
 
 ## 빠른 점검 방법
 
@@ -252,3 +290,9 @@ curl -s http://localhost:3000/auth/github/login
 
 - 로그인 후 `POST /api/requests` 호출 시
 - 미설정이면 `github_repository_not_configured` 또는 `github_trigger_credentials_not_configured`
+
+## 추가 운영 메모
+
+- OAuth 로그인, OAuth callback, workflow trigger endpoint에는 간단한 in-memory rate limit이 적용됩니다.
+- 단일 인스턴스 기준 보호이며, 다중 인스턴스 환경에서는 Redis 같은 외부 저장소 기반 제한이 더 적합합니다.
+- 모든 요청에는 `X-Request-Id` 헤더가 부여되며, 서버 로그도 같은 correlation id로 기록됩니다.

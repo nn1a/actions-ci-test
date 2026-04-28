@@ -21,8 +21,10 @@ fi
 : "${GITHUB_OAUTH_CLIENT_ID:?GITHUB_OAUTH_CLIENT_ID is required}"
 : "${GITHUB_OAUTH_CALLBACK_URL:?GITHUB_OAUTH_CALLBACK_URL is required}"
 
+TEST_PORT="${E2E_PORT:-3900}"
+
 echo "[e2e] Starting backend server"
-node src/server.js >/tmp/actions-ci-e2e.log 2>&1 &
+PORT="$TEST_PORT" node src/server.js >/tmp/actions-ci-e2e.log 2>&1 &
 SERVER_PID=$!
 cleanup() {
   kill "$SERVER_PID" >/dev/null 2>&1 || true
@@ -30,24 +32,42 @@ cleanup() {
 trap cleanup EXIT
 
 for _ in {1..30}; do
-  if curl -fsS "http://localhost:${PORT}/health" >/dev/null; then
+  if curl -fsS "http://localhost:${TEST_PORT}/health" >/dev/null 2>/dev/null; then
     break
+  fi
+  if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    echo "[e2e] Backend process exited early"
+    cat /tmp/actions-ci-e2e.log || true
+    exit 1
   fi
   sleep 1
 done
 
-if ! curl -fsS "http://localhost:${PORT}/health" >/dev/null; then
+if ! curl -fsS "http://localhost:${TEST_PORT}/health" >/dev/null 2>/dev/null; then
   echo "[e2e] Backend did not become healthy"
+  cat /tmp/actions-ci-e2e.log || true
   exit 1
 fi
 
 echo "[e2e] Validating OAuth login redirect"
 HEADERS_FILE="$(mktemp)"
-curl -sS -D "$HEADERS_FILE" -o /dev/null "http://localhost:${PORT}/auth/github/login"
+BODY_FILE="$(mktemp)"
+curl -sS -D "$HEADERS_FILE" -o "$BODY_FILE" "http://localhost:${TEST_PORT}/auth/github/login"
 LOCATION="$(grep -i '^location:' "$HEADERS_FILE" | sed 's/\r$//' | awk '{print $2}')"
+REQUEST_ID_HEADER_VALUE="$(grep -i '^x-request-id:' "$HEADERS_FILE" | sed 's/\r$//' | awk '{print $2}')"
 
 if [[ -z "$LOCATION" ]]; then
   echo "[e2e] Missing OAuth redirect location"
+  echo "[e2e] Response headers:"
+  cat "$HEADERS_FILE" || true
+  echo "[e2e] Response body:"
+  cat "$BODY_FILE" || true
+  exit 1
+fi
+
+if [[ -z "$REQUEST_ID_HEADER_VALUE" ]]; then
+  echo "[e2e] Missing X-Request-Id header on OAuth redirect"
+  cat "$HEADERS_FILE" || true
   exit 1
 fi
 
@@ -58,6 +78,11 @@ fi
 
 if [[ "$LOCATION" != *"client_id=${GITHUB_OAUTH_CLIENT_ID}"* ]]; then
   echo "[e2e] OAuth location missing client_id"
+  exit 1
+fi
+
+if [[ "$LOCATION" != *"scope=read%3Auser+user%3Aemail+read%3Aorg"* ]]; then
+  echo "[e2e] OAuth location missing expected read:org scope"
   exit 1
 fi
 
@@ -73,7 +98,7 @@ if [[ "$LOCATION" != *"redirect_uri=${ENCODED_CALLBACK}"* ]]; then
 fi
 
 echo "[e2e] Validating callback state protection"
-CALLBACK_RESPONSE="$(curl -sS "http://localhost:${PORT}/auth/github/callback?code=dummy&state=invalid")"
+CALLBACK_RESPONSE="$(curl -sS "http://localhost:${TEST_PORT}/auth/github/callback?code=dummy&state=invalid")"
 if [[ "$CALLBACK_RESPONSE" != *"invalid_oauth_state"* ]]; then
   echo "[e2e] Callback state protection check failed: $CALLBACK_RESPONSE"
   exit 1
@@ -102,19 +127,29 @@ NODE
 )"
 
 echo "[e2e] Validating authenticated endpoints"
-ME_RESPONSE="$(curl -sS -b "portal_session=${SESSION_TOKEN}" "http://localhost:${PORT}/api/me")"
+ME_HEADERS_FILE="$(mktemp)"
+ME_BODY_FILE="$(mktemp)"
+curl -sS -D "$ME_HEADERS_FILE" -o "$ME_BODY_FILE" -b "portal_session=${SESSION_TOKEN}" "http://localhost:${TEST_PORT}/api/me"
+ME_RESPONSE="$(cat "$ME_BODY_FILE")"
 if [[ "$ME_RESPONSE" != *"\"github_login\":\"e2e-user\""* ]]; then
   echo "[e2e] /api/me check failed: $ME_RESPONSE"
   exit 1
 fi
 
-OPTIONS_RESPONSE="$(curl -sS -b "portal_session=${SESSION_TOKEN}" "http://localhost:${PORT}/api/options")"
+ME_REQUEST_ID_HEADER_VALUE="$(grep -i '^x-request-id:' "$ME_HEADERS_FILE" | sed 's/\r$//' | awk '{print $2}')"
+if [[ -z "$ME_REQUEST_ID_HEADER_VALUE" ]]; then
+  echo "[e2e] Missing X-Request-Id header on /api/me"
+  cat "$ME_HEADERS_FILE" || true
+  exit 1
+fi
+
+OPTIONS_RESPONSE="$(curl -sS -b "portal_session=${SESSION_TOKEN}" "http://localhost:${TEST_PORT}/api/options")"
 if [[ "$OPTIONS_RESPONSE" != *"job_types"* ]]; then
   echo "[e2e] /api/options check failed: $OPTIONS_RESPONSE"
   exit 1
 fi
 
-CSRF_TOKEN="$(curl -sS -b "portal_session=${SESSION_TOKEN}" "http://localhost:${PORT}/api/csrf-token" | jq -r '.csrf_token')"
+CSRF_TOKEN="$(curl -sS -b "portal_session=${SESSION_TOKEN}" "http://localhost:${TEST_PORT}/api/csrf-token" | jq -r '.csrf_token')"
 if [[ -z "$CSRF_TOKEN" || "$CSRF_TOKEN" == "null" ]]; then
   echo "[e2e] Failed to get CSRF token"
   exit 1
@@ -122,7 +157,7 @@ fi
 
 if [[ "${RUN_DISPATCH:-false}" == "true" ]]; then
   echo "[e2e] Triggering dispatch request"
-  REQUEST_RESPONSE="$(curl -sS -X POST "http://localhost:${PORT}/api/requests" \
+  REQUEST_RESPONSE="$(curl -sS -X POST "http://localhost:${TEST_PORT}/api/requests" \
     -b "portal_session=${SESSION_TOKEN}" \
     -H "Content-Type: application/json" \
     -H "X-CSRF-Token: ${CSRF_TOKEN}" \

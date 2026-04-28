@@ -6,19 +6,41 @@ import express from 'express';
 
 dotenv.config();
 
+const DEFAULT_SESSION_SECRET = 'dev-only-session-secret-change-me';
+const REQUEST_ID_HEADER = 'x-request-id';
+
 const config = loadConfig();
+validateStartupConfig(config);
 const app = express();
+const oauthLoginRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 20,
+  keyFn: (req) => req.ip,
+});
+const oauthCallbackRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 30,
+  keyFn: (req) => req.ip,
+});
+const triggerRateLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 10,
+  keyFn: (req) => req.session?.github_login || req.ip,
+});
 
 app.disable('x-powered-by');
+app.use(attachRequestContext);
+app.use(logIncomingRequest);
 app.use(express.json({ limit: '32kb' }));
 app.use(cookieParser());
 app.use(express.static('public'));
+app.use(logCompletedRequest);
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/auth/github/login', (_req, res) => {
+app.get('/auth/github/login', oauthLoginRateLimiter, (_req, res) => {
   requireOauthConfig(config);
   const state = issueSignedToken(
     { nonce: crypto.randomBytes(16).toString('hex') },
@@ -31,13 +53,13 @@ app.get('/auth/github/login', (_req, res) => {
   const authorizeUrl = new URL('https://github.com/login/oauth/authorize');
   authorizeUrl.searchParams.set('client_id', config.githubOauthClientId);
   authorizeUrl.searchParams.set('redirect_uri', config.githubOauthCallbackUrl);
-  authorizeUrl.searchParams.set('scope', 'read:user user:email');
+  authorizeUrl.searchParams.set('scope', 'read:user user:email read:org');
   authorizeUrl.searchParams.set('state', state);
 
   res.redirect(authorizeUrl.toString());
 });
 
-app.get('/auth/github/callback', async (req, res, next) => {
+app.get('/auth/github/callback', oauthCallbackRateLimiter, async (req, res, next) => {
   try {
     requireOauthConfig(config);
     const code = typeof req.query.code === 'string' ? req.query.code : '';
@@ -57,6 +79,7 @@ app.get('/auth/github/callback', async (req, res, next) => {
     const { user, email } = await fetchGithubUser(accessToken, config);
 
     enforceAllowedGithubLogin(user.login, config);
+    await enforceGithubMembership(accessToken, user.login, config);
 
     const sessionToken = issueSignedToken(
       {
@@ -109,7 +132,7 @@ app.get('/api/csrf-token', requireSession(config), (req, res) => {
   res.json({ csrf_token: csrfToken });
 });
 
-app.post('/api/requests', requireSession(config), requireCsrfToken(config), async (req, res, next) => {
+app.post('/api/requests', requireSession(config), requireCsrfToken(config), triggerRateLimiter, async (req, res, next) => {
   try {
     requireGithubTriggerCredentials(config);
     const requestBody = validateRequestBody(req.body, config);
@@ -204,6 +227,16 @@ app.get('/api/runs/:runId', requireSession(config), async (req, res, next) => {
 });
 
 app.use((error, _req, res, _next) => {
+  if (_req.requestContext) {
+    logEvent('request.error', {
+      request_id: _req.requestContext.requestId,
+      method: _req.method,
+      path: _req.originalUrl,
+      error: error instanceof HttpError ? error.body.error : 'internal_server_error',
+      status_code: error instanceof HttpError ? error.statusCode : 500,
+    });
+  }
+
   if (error instanceof HttpError) {
     return res.status(error.statusCode).json(error.body);
   }
@@ -225,8 +258,9 @@ function loadConfig() {
   return {
     port: Number(process.env.PORT || 3000),
     uiRedirectUrl: process.env.UI_REDIRECT_URL || 'http://localhost:3000/',
-    sessionSecret: process.env.SESSION_SECRET || 'dev-only-session-secret-change-me',
+    sessionSecret: process.env.SESSION_SECRET || DEFAULT_SESSION_SECRET,
     cookieSecure: process.env.COOKIE_SECURE === 'true',
+    nodeEnv: process.env.NODE_ENV || 'development',
     sessionTtlSeconds: Number(process.env.SESSION_TTL_SECONDS || 28800),
     githubOauthClientId: process.env.GITHUB_OAUTH_CLIENT_ID || '',
     githubOauthClientSecret: process.env.GITHUB_OAUTH_CLIENT_SECRET || '',
@@ -243,9 +277,78 @@ function loadConfig() {
     allowedServices: parseCsv(process.env.ALLOWED_SERVICES || 'billing-api,auth-api,web-frontend'),
     allowedEnvironments: parseCsv(process.env.ALLOWED_ENVIRONMENTS || 'staging,prod'),
     allowedGithubLogins: parseCsv(process.env.ALLOWED_GITHUB_LOGINS || ''),
+    requiredGithubOrg: process.env.REQUIRED_GITHUB_ORG || '',
+    requiredGithubTeamSlug: process.env.REQUIRED_GITHUB_TEAM_SLUG || '',
     sessionCookieName: 'portal_session',
     oauthStateCookieName: 'portal_oauth_state',
   };
+}
+
+function validateStartupConfig(config) {
+  if (config.sessionSecret !== DEFAULT_SESSION_SECRET) {
+    return;
+  }
+
+  if (config.nodeEnv === 'production') {
+    throw new Error('SESSION_SECRET must be set explicitly when NODE_ENV=production');
+  }
+
+  console.warn('[config] Using default development SESSION_SECRET. Set SESSION_SECRET before non-local use.');
+}
+
+function attachRequestContext(req, res, next) {
+  const requestId = extractRequestId(req.headers[REQUEST_ID_HEADER]) || crypto.randomUUID();
+  req.requestContext = {
+    requestId,
+    startedAt: Date.now(),
+  };
+  res.setHeader(REQUEST_ID_HEADER, requestId);
+  next();
+}
+
+function logIncomingRequest(req, _res, next) {
+  logEvent('request.start', {
+    request_id: req.requestContext.requestId,
+    method: req.method,
+    path: req.originalUrl,
+    ip: req.ip,
+  });
+  next();
+}
+
+function logCompletedRequest(req, res, next) {
+  res.on('finish', () => {
+    logEvent('request.finish', {
+      request_id: req.requestContext.requestId,
+      method: req.method,
+      path: req.originalUrl,
+      status_code: res.statusCode,
+      duration_ms: Date.now() - req.requestContext.startedAt,
+      github_login: req.session?.github_login || null,
+    });
+  });
+  next();
+}
+
+function extractRequestId(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 200) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+function logEvent(event, fields) {
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event,
+    ...fields,
+  }));
 }
 
 function parseCsv(value) {
@@ -253,6 +356,28 @@ function parseCsv(value) {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function createRateLimiter({ windowMs, maxRequests, keyFn }) {
+  const buckets = new Map();
+
+  return (req, _res, next) => {
+    const key = keyFn(req) || 'anonymous';
+    const now = Date.now();
+    const bucket = buckets.get(key);
+
+    if (!bucket || now - bucket.startedAt >= windowMs) {
+      buckets.set(key, { count: 1, startedAt: now });
+      return next();
+    }
+
+    if (bucket.count >= maxRequests) {
+      return next(new HttpError(429, { error: 'rate_limit_exceeded' }));
+    }
+
+    bucket.count += 1;
+    return next();
+  };
 }
 
 function hasGithubTriggerCredentials(config) {
@@ -294,6 +419,33 @@ function requireGithubTriggerCredentials(config) {
     message:
       'Set GITHUB_TRIGGER_TOKEN or GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_APP_INSTALLATION_ID',
   });
+}
+
+async function enforceGithubMembership(accessToken, githubLogin, config) {
+  if (!config.requiredGithubOrg) {
+    return;
+  }
+
+  const orgMembership = await fetchOrgMembership(accessToken, config.requiredGithubOrg, config);
+  if (!orgMembership) {
+    throw new HttpError(403, { error: 'not_allowed_by_org_membership' });
+  }
+
+  if (!config.requiredGithubTeamSlug) {
+    return;
+  }
+
+  const teamMembership = await fetchTeamMembership(
+    accessToken,
+    config.requiredGithubOrg,
+    config.requiredGithubTeamSlug,
+    githubLogin,
+    config,
+  );
+
+  if (!teamMembership) {
+    throw new HttpError(403, { error: 'not_allowed_by_team_membership' });
+  }
 }
 
 function buildCookieOptions(config, maxAge) {
@@ -488,6 +640,35 @@ async function fetchGithubUser(accessToken, config) {
   return { user, email };
 }
 
+async function fetchOrgMembership(accessToken, org, config) {
+  const organizations = await githubRequest(config, '/user/orgs', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  return Array.isArray(organizations) && organizations.some((entry) => entry.login === org);
+}
+
+async function fetchTeamMembership(accessToken, org, teamSlug, githubLogin, config) {
+  try {
+    await githubRequest(config, `/orgs/${org}/teams/${teamSlug}/memberships/${githubLogin}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof HttpError && error.body?.error === 'github_api_request_failed') {
+      const status = error.body?.status;
+      if (status === 404 || status === 403) {
+        return false;
+      }
+    }
+    throw error;
+  }
+}
+
 let cachedInstallationToken = null;
 let cachedTokenExpiration = 0;
 
@@ -560,10 +741,11 @@ async function getInstallationToken(config) {
 
 async function githubRequest(config, path, options = {}) {
   const url = new URL(path, config.githubApiBaseUrl);
-  const token = await getInstallationToken(config);
+  const authorizationHeader = options.headers?.Authorization || options.headers?.authorization;
+  const token = authorizationHeader ? null : await getInstallationToken(config);
   const headers = {
     Accept: 'application/vnd.github+json',
-    Authorization: `Bearer ${token}`,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
     'User-Agent': 'actions-ci-backend',
     'X-GitHub-Api-Version': '2022-11-28',
     ...(options.headers || {}),

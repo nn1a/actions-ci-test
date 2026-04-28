@@ -54,6 +54,7 @@ Current server behavior is intentionally split:
 	- `oauth_not_configured`
 	- `github_repository_not_configured`
 	- `github_trigger_credentials_not_configured`
+- `NODE_ENV=production` with default session secret blocks startup.
 
 ## Minimal Request Handling Flow
 
@@ -68,6 +69,11 @@ Current server behavior is intentionally split:
 
 - Check organization or team membership if needed
 - Check whether the user can submit the requested `job_type`
+
+Current implementation supports login-stage gating with:
+
+- `REQUIRED_GITHUB_ORG`
+- `REQUIRED_GITHUB_TEAM_SLUG`
 
 ### 3. Validate
 
@@ -127,6 +133,25 @@ This keeps the backend stateless while avoiding local-storage token handling in 
 	- `missing_csrf_token`
 	- `invalid_csrf_token`
 
+## Rate Limiting
+
+- In-memory rate limiting is applied to:
+	- `GET /auth/github/login`
+	- `GET /auth/github/callback`
+	- `POST /api/requests`
+- Current goal is lightweight abuse protection for a single-node deployment.
+- For multi-instance deployment, replace this with a shared limiter such as Redis.
+
+## Structured Logging
+
+- Every request gets a correlation id.
+- The server returns it as `X-Request-Id`.
+- JSON logs are emitted for:
+	- `request.start`
+	- `request.finish`
+	- `request.error`
+- This makes it easier to trace one login or trigger request across app logs and reverse proxy logs.
+
 ## How To Show Real Requester In Actions
 
 The workflow actor will usually be the backend identity. To show the real requester:
@@ -170,3 +195,5 @@ RUN_DISPATCH=true npm run e2e:oauth
 ```
 
 The smoke script validates health, OAuth redirect, callback state handling, session-auth endpoints, and optional dispatch flow.
+
+The script uses a dedicated test port by default (`E2E_PORT=3900`) to avoid colliding with an already running local server.
